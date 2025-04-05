@@ -11,7 +11,7 @@ keywords = ["collection", "simd", "map"]
 
 [dev-dependencies]
 criterion = { version = "0.4", features = ["html_reports"] }
-highway = "1.3.0"
+rustc-hash = "2.1.1"
 rand = "0.9.0"
 
 [[bench]]

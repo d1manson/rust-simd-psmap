@@ -50,7 +50,7 @@ In this example, simply scanning the first character is enough to distinguish al
 
 and then compare the first character of the query string against that.
 
-It's more than 2x as fast as `std::HashMap` (using `HighwayHasher` is also shown for reference):
+It's more than 2x as fast as the default `std::HashMap`, though only slightly faster than `FxHashMap`:
 
 ![Alt text](docs/violin1.svg)
 

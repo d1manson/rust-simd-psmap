@@ -1,6 +1,6 @@
 #![feature(portable_simd)]
 use std::collections::HashMap;
-use highway::HighwayHasher;
+use rustc_hash::FxHashMap;
 use std::hash::BuildHasherDefault;
 use criterion::{criterion_group, criterion_main, Criterion};
 use rand::Rng;
@@ -45,10 +45,11 @@ fn criterion_benchmark(c: &mut Criterion) {
     group.bench_function("std::HashMap", |b| b.iter(|| h.get(value_iter.next().unwrap())));
     
 
-    let h = HashMap::<String, DummyVal, BuildHasherDefault::<HighwayHasher>>::from_iter(kvs.into_iter());
+    
+    let h = FxHashMap::<String, DummyVal>::from_iter(kvs.into_iter());
     assert_eq!(h.get("key1"), Some(&DummyVal(1001)));
     assert_eq!(h.get("another".into()), Some(&DummyVal(1004)));
-    group.bench_function("std::HashMap<..HighwayHasher>", |b| b.iter(|| h.get(value_iter.next().unwrap())));
+    group.bench_function("FxHashMap", |b| b.iter(|| h.get(value_iter.next().unwrap())));
     
 
     group.finish();
@@ -83,10 +84,10 @@ fn criterion_benchmark(c: &mut Criterion) {
     assert_eq!(h.get("key1longer".into()), Some(&DummyVal(1002)));
     group.bench_function("std::HashMap", |b| b.iter(|| h.get(value_iter.next().unwrap())));
     
-    let h = HashMap::<String, DummyVal, BuildHasherDefault::<HighwayHasher>>::from_iter(kvs.into_iter());
+    let h = FxHashMap::<String, DummyVal>::from_iter(kvs.into_iter());
     assert_eq!(h.get("key1"), Some(&DummyVal(1001)));
     assert_eq!(h.get("key1longer".into()), Some(&DummyVal(1002)));
-    group.bench_function("std::HashMap<..HighwayHasher>", |b| b.iter(|| h.get(value_iter.next().unwrap())));
+    group.bench_function("FxHashMap", |b| b.iter(|| h.get(value_iter.next().unwrap())));
 
     group.finish();
 
