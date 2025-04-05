@@ -23,7 +23,7 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
     // we allocate the below as inline arrays, but we only need n_lanes_of_entities * n_chars elements (always <= N_TEST_LANES)
     char_positions: [usize; N_TEST_LANES],
     indexes: [Simd<u8, LANE_SIZE_TEST>; N_TEST_LANES],
-    masks: [u64; N_TEST_LANES]
+    n_valid: [usize; N_TEST_LANES]
 }
 
 
@@ -70,6 +70,7 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
                     let k_self = k_self.as_bytes();
                     let mut tests_matches_keys = vec![true; key_vals.len()];
                     for &char_idx_sub in positions[..].iter() {
+                        // we could pad with zero beyond the end of a key, but instead we pad with 0, 1, 2, 3, ... as that's more valuable when scanning
                         let char_self =  *k_self.get(char_idx_sub).unwrap_or(&((char_idx_sub.wrapping_sub(k_self.len()) as u8)));
                         for (idx, (k_other, _)) in key_vals.iter().enumerate() {
                             let k_other = k_other.as_bytes();
@@ -98,7 +99,7 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
         let n_chars = positions.len();   
 
         let mut indexes = [Simd::<u8, LANE_SIZE_TEST>::splat(0); N_TEST_LANES];
-        let mut masks = [0; N_TEST_LANES];
+        let mut n_valid = [0; N_TEST_LANES];
         let mut char_positions = [0; N_TEST_LANES];
         for lane_idx in 0..n_lanes_of_entities {
             for scan_idx in 0..n_chars {
@@ -113,7 +114,7 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
                     v[idx] = *k.get(char_positions[scan_idx]).unwrap_or(&((char_positions[scan_idx].wrapping_sub(k.len())) as u8));
                 }
                 indexes[test_idx] = v;
-                masks[test_idx] = if end_idx - start_idx == 64 as usize { !0 } else { (1 << (end_idx - start_idx)) - 1};
+                n_valid[test_idx] = end_idx - start_idx;
             }
         }
 
@@ -122,7 +123,7 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
             n_chars,
             char_positions,
             indexes,
-            masks,
+            n_valid,
             key_vals
         });
     }
@@ -154,24 +155,30 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
                 }
                 let char_idx = self.char_positions[test_idx];
                 
+                // it would be nice to use .unwrap_or(&alt), but the compiler isn't able to optimise that because zero might
+                // be a legitimate value in query which shouldn't be replaced (and it relies on being able to do that).
+                // We do opt to treat zero as special, basically we assume no actual query String contains a zero byte.
                 let alt = char_idx.wrapping_sub(query.len()) as u8;
                 let query_c = *query.get(char_idx).unwrap_or(&0);
                 let query_c = if query_c == 0 { alt } else { query_c };
 
                 let index = self.indexes[test_idx];
                 matched &= index.simd_eq(Simd::<u8, LANE_SIZE_TEST>::splat(query_c));
-                test_idx += 1;
+                test_idx += 1; // = lane_idx * n_chars + scan_idx  (but implemented as a counter)
             }
             unsafe {
                 // SAFETY: designed that way in `try_from` method, which is the only way to construct this struct
                 hint::assert_unchecked(test_idx -1 < N_TEST_LANES);
             }
-            let matched = matched.to_bitmask() & self.masks[test_idx-1];
-            matched_idx += if matched == 0 { 0 } else { matched.trailing_zeros() as usize + lane_idx * LANE_SIZE_TEST };
+
+            // there can only ever be one match given how we construct the indexes (even if the query is not a valid key, the index design still ensures uniqueness)
+            // thus we can use += instead of an if statement here, which is faster.
+            let matched = matched.first_set().unwrap_or(0);
+            matched_idx += if matched < self.n_valid[test_idx -1] && matched != 0 { matched as usize + lane_idx * LANE_SIZE_TEST } else { 0 };
         }
         
         unsafe {
-            // SAFETY:  the `& self.masks[test_idx]` ensures that the only bits that can be 1 are those actually corresponding to a key (given how masks are constructed)
+            // SAFETY:  see the line above with self.n_valid, and the comment above that line
             hint::assert_unchecked(matched_idx < self.key_vals.len());
         }
 
