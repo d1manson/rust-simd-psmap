@@ -1,9 +1,10 @@
 #![feature(portable_simd)]
 
 use std::convert::TryFrom;
-use std::{hint, usize};
+use std::simd::num::SimdInt;
+use std::{array, hint, usize};
 use std::simd::cmp::SimdPartialEq;
-use std::simd::{Simd, Mask, SupportedLaneCount, LaneCount};
+use std::simd::{Simd, SupportedLaneCount, LaneCount};
 
 const MAX_KEY_SEARCH_LEN: usize = 32;
 
@@ -147,7 +148,8 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
         let mut matched_idx = 0;
         let mut test_idx = 0;
         for lane_idx in 0..self.n_lanes_of_entities {
-            let mut matched = Mask::<i8, LANE_SIZE_TEST>::splat(true);
+            let matched: [i8; LANE_SIZE_TEST] = array::from_fn(|i| (LANE_SIZE_TEST - i) as i8); 
+            let mut matched = Simd::<i8, LANE_SIZE_TEST>::from(matched);
             for _scan_idx in 0..self.n_chars {                
                 unsafe {
                     // SAFETY: designed that way in `try_from` method, which is the only way to construct this struct
@@ -163,7 +165,7 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
                 let query_c = if query_c == 0 { alt } else { query_c };
 
                 let index = self.indexes[test_idx];
-                matched &= index.simd_eq(Simd::<u8, LANE_SIZE_TEST>::splat(query_c));
+                matched &= index.simd_eq(Simd::<u8, LANE_SIZE_TEST>::splat(query_c)).to_int();
                 test_idx += 1; // = lane_idx * n_chars + scan_idx  (but implemented as a counter)
             }
             unsafe {
@@ -173,7 +175,7 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
 
             // there can only ever be one match given how we construct the indexes (even if the query is not a valid key, the index design still ensures uniqueness)
             // thus we can use += instead of an if statement here, which is faster.
-            let matched = matched.first_set().unwrap_or(0);
+            let matched = LANE_SIZE_TEST - matched.reduce_max() as usize; // amazingly, using reduce_max(), having started with [16, 15, ..., 1, 0] is faster than using a mask and .first_set()
             matched_idx += if matched < self.n_valid[test_idx -1] && matched != 0 { matched as usize + lane_idx * LANE_SIZE_TEST } else { 0 };
         }
         
