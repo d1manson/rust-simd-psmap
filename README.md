@@ -2,7 +2,15 @@
 
 A fast Map implementation in Rust designed for **immutable** maps with about **100 keys** or less. Requires **nightly Rust** for
 access to the `portable_simd` feature (which is critical here). It claims to be about 2x faster than `std::HashMap` in the
-sweetspot usecase.
+sweetspot usecase.  
+
+**Update:** it's hard to beat `FxHashMap`, but it can do so by a small margin in the best cases. So this is likely not that useful as is, 
+though maybe there is some potential here with a bit more work. That said, one thing this kind of approach can potentially work for
+is matching against an "open-ended" slice, where you don't know where the end of the key is in your query string (which is sort of
+the original use case that inspired this to be created). For a regular hash map you can only query on an exact key (in order to hash it).
+
+
+### How it works
 
 It is a bit like a [Perfect hash map](https://en.wikipedia.org/wiki/Perfect_hash_function) in that it preforms a chunk of work upfront to ensure efficient lookups later.
 
@@ -78,14 +86,37 @@ Each new scan adds a few hundred picoseconds, making this slightly less than 2x 
 
 ![Alt text](docs/violin2.svg)
 
-If your architecture supports 512 bit SIMD, you should be able to handle 64 keys just as fast as 6. In real world usage my
-sense is that 2-3 scans is probably enough in most cases.
+
+**Example 3**
+
+Here we take a random sample from a list of 59 keys from a [real world schema](https://data.crunchbase.com/reference/get_data-entities-organizations-entity-id), where
+we vary the sample size and see how the performance varies.
+
+```rust
+// keys (which we sample from)
+[ "acquirer_identifier","aliases","categories","category_groups","closed_on","company_type","contact_email","created_at","delisted_on","demo_days","description","entity_def_id","exited_on","facebook","facet_ids","founded_on","founder_identifiers","hub_tags","identifier","image_id","image_url","layout_id","legal_name","linkedin","listed_stock_symbol","location_group_identifiers","location_identifiers","name","num_alumni","num_current_advisor_positions","num_current_positions","num_employees_enum","num_enrollments","num_event_appearances","num_portfolio_organizations","num_sub_organizations","operating_status","owner_identifier","permalink","permalink_aliases","phone_number","program_application_deadline","program_duration","program_type","rank","rank_org","school_method","school_program","school_type","short_description","status","stock_exchange_symbol","stock_symbol","twitter","updated_at","uuid","website","website_url","went_public_on"];
+```
+
+ Note that performance is not just a function of the number of keys, but how many scans are required to
+dismabiguate the keys, and how long the keys are (for the final string comparison, aka the validation step).
+
+Whereaas the above benchmarks were done on an M4 Mac, this was done in GCP using an `e2-standard-2 (2 vCPUs, 8 GB Memory) / Intel Broadwell` instance, with `+avx2`,
+i.e. 32 bytes per SIMD lane. For comparison, the `std::HashMap` takes ~30ns, and the `FxHashMap` is ~15ns.
+
+![Alt text](docs/lines3.svg)
+
+As you can see, the performance is relatively stable (and comparable to `FxHashMap) while the number of keys is less than the width of a SIMD lane, and then it jumps up.
+If your architecture supports 512 bit SIMD, you should be able to get up to 64 without a huge increase, assuming the number of scans doesn't go much above 3.
 
 ### Faster?
 
 The original version of this map used SIMD even more widely, in particular the `query` string was always zero padded to make using SIMD easier in the verify step, which seems to actually be a particularly slow part of the logic. That original version
 also didn't require you to pre-slice the query string to the key length, you just needed to provide an "open endeded" slice,
-starting at the start of the key, this allowed for even more optimisation upstream.
+starting at the start of the key, this allowed for even more optimisation upstream. 
+
+When the number of keys is longer than a single SIMD lane it ought to be better to partition the keys so that even if the some of the scans need to be applied to all lanes,
+other scans can be applied within a single lane (to disambiguate keys within the lane once it's established that the query doesn't belong to any of the keys in other lanes),
+thus reducing the total number of operations.
 
 The logic within the constructor has not been at all optimised - it has some very deeply nested loops which "solve" the perfect
 problem deterministically, but not very efficiently. That said, for the relevant size of map (<100keys) it's probably not a big deal.
