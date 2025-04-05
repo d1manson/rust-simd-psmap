@@ -5,8 +5,6 @@ use std::{hint, usize};
 use std::simd::cmp::SimdPartialEq;
 use std::simd::{Simd, Mask, SupportedLaneCount, LaneCount};
 
-
-const TERMINAL_BYTE : u8 = 1; // this is used for the byte beyond the last valid char in the key, that's then followed by zero padding
 const MAX_KEY_SEARCH_LEN: usize = 32;
 
 fn roughly_log_2(x: usize) -> usize {
@@ -72,11 +70,11 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
                     let k_self = k_self.as_bytes();
                     let mut tests_matches_keys = vec![true; key_vals.len()];
                     for &char_idx_sub in positions[..].iter() {
-                        let char_self = if char_idx_sub == k_self.len() { TERMINAL_BYTE } else { *k_self.get(char_idx_sub).unwrap_or(&0) };
+                        let char_self =  *k_self.get(char_idx_sub).unwrap_or(&((char_idx_sub.wrapping_sub(k_self.len()) as u8)));
                         for (idx, (k_other, _)) in key_vals.iter().enumerate() {
                             let k_other = k_other.as_bytes();
-                            let char_other = if char_idx_sub == k_other.len() { TERMINAL_BYTE } else { *k_other.get(char_idx_sub).unwrap_or(&0) };
-                            tests_matches_keys[idx] &= (char_self == char_other) | (char_other == 0);
+                            let char_other = *k_other.get(char_idx_sub).unwrap_or(&((char_idx_sub.wrapping_sub(k_other.len())) as u8)) ;
+                            tests_matches_keys[idx] &= char_self == char_other;
                         }
                     }
                     let tests_scan_n_other_keys: usize = tests_matches_keys.iter().map(|&b| b as usize).sum::<usize>() - 1;
@@ -112,7 +110,7 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
                 let end_idx = if start_idx + LANE_SIZE_TEST > key_vals.len() { key_vals.len() } else { start_idx + LANE_SIZE_TEST };
                 for (idx, (k, _)) in key_vals[start_idx..end_idx].iter().enumerate() {
                     let k = k.as_bytes();
-                    v[idx] = if char_positions[scan_idx] == k.len() { TERMINAL_BYTE } else { *k.get(char_positions[scan_idx]).unwrap_or(&0) };
+                    v[idx] = *k.get(char_positions[scan_idx]).unwrap_or(&((char_positions[scan_idx].wrapping_sub(k.len())) as u8));
                 }
                 indexes[test_idx] = v;
                 masks[test_idx] = if end_idx - start_idx == 64 as usize { !0 } else { (1 << (end_idx - start_idx)) - 1};
@@ -146,24 +144,30 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
         }
 
         let mut matched_idx = 0;
+        let mut test_idx = 0;
         for lane_idx in 0..self.n_lanes_of_entities {
             let mut matched = Mask::<i8, LANE_SIZE_TEST>::splat(true);
-            for scan_idx in 0..self.n_chars {
-                let test_idx = lane_idx * self.n_chars + scan_idx;
+            for _scan_idx in 0..self.n_chars {                
                 unsafe {
                     // SAFETY: designed that way in `try_from` method, which is the only way to construct this struct
                     hint::assert_unchecked(test_idx < N_TEST_LANES);
                 }
                 let char_idx = self.char_positions[test_idx];
                 
-                let query_c = if char_idx == query.len() { &TERMINAL_BYTE } else { query.get(char_idx).unwrap_or(&0) };
+                let alt = char_idx.wrapping_sub(query.len()) as u8;
+                let query_c = *query.get(char_idx).unwrap_or(&0);
+                let query_c = if query_c == 0 { alt } else { query_c };
 
                 let index = self.indexes[test_idx];
-                matched &= index.simd_eq(Simd::<u8, LANE_SIZE_TEST>::splat(*query_c)) | index.simd_eq(Simd::<u8, LANE_SIZE_TEST>::splat(0));
+                matched &= index.simd_eq(Simd::<u8, LANE_SIZE_TEST>::splat(query_c));
+                test_idx += 1;
             }
-            let test_idx = lane_idx * self.n_chars + 0;
-            let matched = matched.to_bitmask() & self.masks[test_idx];
-            matched_idx += if matched == 0 { 0 } else  { matched.trailing_zeros() as usize + lane_idx * LANE_SIZE_TEST}; 
+            unsafe {
+                // SAFETY: designed that way in `try_from` method, which is the only way to construct this struct
+                hint::assert_unchecked(test_idx -1 < N_TEST_LANES);
+            }
+            let matched = matched.to_bitmask() & self.masks[test_idx-1];
+            matched_idx += if matched == 0 { 0 } else { matched.trailing_zeros() as usize + lane_idx * LANE_SIZE_TEST };
         }
         
         unsafe {
