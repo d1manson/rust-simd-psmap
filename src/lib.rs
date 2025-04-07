@@ -12,25 +12,32 @@ fn roughly_log_2(x: usize) -> usize {
     (usize::BITS - x.leading_zeros()) as usize
 }
 
-/// Use `::try_from()` to construct an instance. It is immutable after construction, only query it with `.get()`, or `.iter()`.
-/// It is best suited to <100 keys, but you can stretch things further with a lareg enough value for `N_TEST_LANES`. 
+/// Use `::try_from()` to construct an instance. It is immutable after construction; query it with `.get()`, or `.iter()`.
+/// 
+/// Set `LANE_SIZE` to the maxium available SIMD width for the target architecture, in bytes; ideally 64, but 16 is still not too bad.
+/// Note portable_simd will work with any value via emulation, but it's not a good idea to do extra work if it's expensive.
+/// 
+/// To pick a value for `MAX_LANES`, you really need to benchmark against alternative map implementations to see how many lanes of
+/// work can be executed here before it becomes slower than another map implementation.
+/// 
+/// It is best suited to <100 keys, but you can stretch things further with a large enough value for `MAX_LANES`. 
 #[derive(Debug)]
-pub struct SimdPerfectScanMap<T, const N_TEST_LANES: usize, const LANE_SIZE_TEST: usize> 
-where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
+pub struct SimdPerfectScanMap<T, const MAX_LANES: usize, const LANE_SIZE: usize> 
+where LaneCount<LANE_SIZE>: SupportedLaneCount
 {
     key_vals: Vec<(String, T)>,
     n_lanes_of_entities: usize,
     n_chars: usize,
-    // we allocate the below as inline arrays, but we only need n_lanes_of_entities * n_chars elements (always <= N_TEST_LANES)
-    char_positions: [usize; N_TEST_LANES],
-    indexes: [Simd<u8, LANE_SIZE_TEST>; N_TEST_LANES],
-    n_valid: [usize; N_TEST_LANES]
+    // we allocate the below as inline arrays, but we only need n_lanes_of_entities * n_chars elements (always <= MAX_LANES)
+    char_positions: [usize; MAX_LANES],
+    indexes: [Simd<u8, LANE_SIZE>; MAX_LANES],
+    n_valid: [usize; MAX_LANES]
 }
 
 
-impl<T, const N_TEST_LANES: usize,  const LANE_SIZE_TEST: usize> TryFrom<Vec<(String, T)>>
-for SimdPerfectScanMap<T, N_TEST_LANES, LANE_SIZE_TEST>  
-where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
+impl<T, const MAX_LANES: usize,  const LANE_SIZE: usize> TryFrom<Vec<(String, T)>>
+for SimdPerfectScanMap<T, MAX_LANES, LANE_SIZE>  
+where LaneCount<LANE_SIZE>: SupportedLaneCount
 {
     type Error = (&'static str, Vec<(String, T)>);
 
@@ -41,23 +48,23 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
             return Err(("Empty map not supported", key_vals));
         }
 
-        if key_vals.len() > N_TEST_LANES * LANE_SIZE_TEST {
+        if key_vals.len() > MAX_LANES * LANE_SIZE {
             return Err(("Too many keys to perform even a single scan", key_vals));
         }
 
         let max_len = key_vals.iter().map(|(k, _)| k.as_bytes().len()).max().unwrap().min(MAX_KEY_SEARCH_LEN);
 
-        let n_lanes_of_entities = key_vals.len().div_ceil(LANE_SIZE_TEST);
+        let n_lanes_of_entities = key_vals.len().div_ceil(LANE_SIZE);
         let mut solved = false;
         let mut positions = vec![0; 0];
         
-        // Yes, there are a lot of nested loops here, but N_TEST_LANES and max_key_len are capped fairly low.
+        // Yes, there are a lot of nested loops here, but MAX_LANES and max_key_len are capped fairly low.
         // If needed there are definitely some straightforward ways to reduce the complexity here, such as by storing the
         // selected characters themselves (as we end up doing in the `indexes` later) and sort after each new char so that
         // duplicates appear next to one another. Then when adding a new char you just need to loop over existing block of 
         // duplicates rather than all other keys, and count how many are still dups as you go. But in reality this is taking
         // less than 1ms at startup so it's not worth over complicating.
-        for _ in 1..=(N_TEST_LANES/n_lanes_of_entities) {
+        for _ in 1..=(MAX_LANES/n_lanes_of_entities) {
             let mut position_score = vec![0; max_len];
             for new_char_idx in 0..max_len {
                 if positions.contains(&new_char_idx){
@@ -99,17 +106,17 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
 
         let n_chars = positions.len();   
 
-        let mut indexes = [Simd::<u8, LANE_SIZE_TEST>::splat(0); N_TEST_LANES];
-        let mut n_valid = [0; N_TEST_LANES];
-        let mut char_positions = [0; N_TEST_LANES];
+        let mut indexes = [Simd::<u8, LANE_SIZE>::splat(0); MAX_LANES];
+        let mut n_valid = [0; MAX_LANES];
+        let mut char_positions = [0; MAX_LANES];
         for lane_idx in 0..n_lanes_of_entities {
             for scan_idx in 0..n_chars {
                 let test_idx = lane_idx * n_chars + scan_idx;
                 char_positions[test_idx] = positions[scan_idx];
 
-                let mut v = Simd::<u8, LANE_SIZE_TEST>::splat(0);
-                let start_idx = lane_idx * LANE_SIZE_TEST;
-                let end_idx = if start_idx + LANE_SIZE_TEST > key_vals.len() { key_vals.len() } else { start_idx + LANE_SIZE_TEST };
+                let mut v = Simd::<u8, LANE_SIZE>::splat(0);
+                let start_idx = lane_idx * LANE_SIZE;
+                let end_idx = if start_idx + LANE_SIZE > key_vals.len() { key_vals.len() } else { start_idx + LANE_SIZE };
                 for (idx, (k, _)) in key_vals[start_idx..end_idx].iter().enumerate() {
                     let k = k.as_bytes();
                     v[idx] = *k.get(char_positions[scan_idx]).unwrap_or(&((char_positions[scan_idx].wrapping_sub(k.len())) as u8));
@@ -119,7 +126,7 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
             }
         }
 
-        return Ok(SimdPerfectScanMap::<T, N_TEST_LANES, LANE_SIZE_TEST>{
+        return Ok(SimdPerfectScanMap::<T, MAX_LANES, LANE_SIZE>{
             n_lanes_of_entities,
             n_chars,
             char_positions,
@@ -131,9 +138,9 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
 }
 
 
-impl<T, const N_TEST_LANES: usize,  const LANE_SIZE_TEST: usize>
-SimdPerfectScanMap<T, N_TEST_LANES, LANE_SIZE_TEST>
-where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
+impl<T, const MAX_LANES: usize,  const LANE_SIZE: usize>
+SimdPerfectScanMap<T, MAX_LANES, LANE_SIZE>
+where LaneCount<LANE_SIZE>: SupportedLaneCount
 {
     /// This is branchless when compiled, except for the loops and the final validaiton check. The loops always make the same number 
     /// of iterations for a given instance, with no early-exit conditions. This should keep the branch predictor happy.
@@ -148,12 +155,12 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
         let mut matched_idx = 0;
         let mut test_idx = 0;
         for lane_idx in 0..self.n_lanes_of_entities {
-            let matched: [i8; LANE_SIZE_TEST] = array::from_fn(|i| (LANE_SIZE_TEST - i) as i8); 
-            let mut matched = Simd::<i8, LANE_SIZE_TEST>::from(matched);
+            let matched: [i8; LANE_SIZE] = array::from_fn(|i| (LANE_SIZE - i) as i8); 
+            let mut matched = Simd::<i8, LANE_SIZE>::from(matched);
             for _scan_idx in 0..self.n_chars {                
                 unsafe {
                     // SAFETY: designed that way in `try_from` method, which is the only way to construct this struct
-                    hint::assert_unchecked(test_idx < N_TEST_LANES);
+                    hint::assert_unchecked(test_idx < MAX_LANES);
                 }
                 let char_idx = self.char_positions[test_idx];
                 
@@ -165,18 +172,18 @@ where LaneCount<LANE_SIZE_TEST>: SupportedLaneCount
                 let query_c = if query_c == 0 { alt } else { query_c };
 
                 let index = self.indexes[test_idx];
-                matched &= index.simd_eq(Simd::<u8, LANE_SIZE_TEST>::splat(query_c)).to_int();
+                matched &= index.simd_eq(Simd::<u8, LANE_SIZE>::splat(query_c)).to_int();
                 test_idx += 1; // = lane_idx * n_chars + scan_idx  (but implemented as a counter)
             }
             unsafe {
                 // SAFETY: designed that way in `try_from` method, which is the only way to construct this struct
-                hint::assert_unchecked(test_idx -1 < N_TEST_LANES);
+                hint::assert_unchecked(test_idx -1 < MAX_LANES);
             }
 
             // there can only ever be one match given how we construct the indexes (even if the query is not a valid key, the index design still ensures uniqueness)
             // thus we can use += instead of an if statement here, which is faster.
-            let matched = LANE_SIZE_TEST - matched.reduce_max() as usize; // amazingly, using reduce_max(), having started with [16, 15, ..., 1, 0] is faster than using a mask and .first_set()
-            matched_idx += if matched < self.n_valid[test_idx -1] && matched != 0 { matched as usize + lane_idx * LANE_SIZE_TEST } else { 0 };
+            let matched = LANE_SIZE - matched.reduce_max() as usize; // amazingly, using reduce_max(), having started with [16, 15, ..., 1, 0] is faster than using a mask and .first_set()
+            matched_idx += if matched < self.n_valid[test_idx -1] && matched != 0 { matched as usize + lane_idx * LANE_SIZE } else { 0 };
         }
         
         unsafe {
